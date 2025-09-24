@@ -2,6 +2,7 @@ package com.example.gymcheckin.ui
 
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
@@ -74,20 +75,15 @@ fun ExcelScreenAdmin(vm: MainViewModel, onBack: () -> Unit = { vm.goTo(Screen.Ad
     var excelUri by remember { mutableStateOf(ExcelLinkStore.getUri(ctx)) }
 
     // Inputs del formulario de pago
-// Inputs del formulario de pago
     var dniPago by remember { mutableStateOf("") }
     var montoPago by remember { mutableStateOf("") }
     var diasPorSemanaTxt by remember { mutableStateOf("") }
-
-// Conversión a número
     val diasPorSemana: Int = diasPorSemanaTxt.toIntOrNull() ?: 0
-
-
 
     // 🔹 Estados para confirmaciones
     var showConfirmDialog by remember { mutableStateOf(false) }
     var showReplaceDialog by remember { mutableStateOf(false) }
-    var pendingUri by remember { mutableStateOf<android.net.Uri?>(null) }
+    var pendingUri by remember { mutableStateOf<Uri?>(null) }
     var lastFileName by remember { mutableStateOf<String?>(null) }
 
     // Launcher para elegir Excel
@@ -159,7 +155,6 @@ fun ExcelScreenAdmin(vm: MainViewModel, onBack: () -> Unit = { vm.goTo(Screen.Ad
                     modifier = Modifier.fillMaxWidth()
                 )
 
-
                 Button(
                     onClick = {
                         val uri = excelUri
@@ -178,14 +173,21 @@ fun ExcelScreenAdmin(vm: MainViewModel, onBack: () -> Unit = { vm.goTo(Screen.Ad
                                     withContext(Dispatchers.IO) {
                                         val monto = montoPago.toDoubleOrNull()
                                             ?: error("Monto inválido")
+
+                                        // ✅ Copiamos a local
+                                        val localFile = sync.copyExcelToLocal(ctx, uri)
+
+                                        // ✅ Operamos en el archivo local
                                         sync.addPagoSolo(
-                                            ctx,
-                                            uri,
+                                            localFile,
                                             dniPago,
                                             monto,
                                             System.currentTimeMillis(),
-                                            diasPorSemana // 👈 agregar este parámetro
+                                            diasPorSemana
                                         )
+
+                                        // ✅ Exportamos de vuelta a Drive
+                                        sync.exportToDrive(ctx, localFile, uri)
                                     }
                                 }
                                     .onSuccess {
@@ -193,6 +195,7 @@ fun ExcelScreenAdmin(vm: MainViewModel, onBack: () -> Unit = { vm.goTo(Screen.Ad
                                         statusKind = MessageKind.Ok
                                         dniPago = ""
                                         montoPago = ""
+                                        diasPorSemanaTxt = ""
                                         refresh()
                                     }
                                     .onFailure { e ->
@@ -293,12 +296,15 @@ private fun refreshCountsExcelOnly(
             if (uri == null) {
                 "Clientes: — • Pagos: — • Asistencias: —"
             } else {
-                val c = sync.readClientes(ctx, uri).size
-                val p = sync.readPagos(ctx, uri).size
-                val a = sync.readAsistencias(ctx, uri).size
+                // ✅ usamos localFile
+                val localFile = sync.copyExcelToLocal(ctx, uri)
+                val c = sync.readClientes(localFile).size
+                val p = sync.readPagos(localFile).size
+                val a = sync.readAsistencias(localFile).size
                 "Clientes: $c • Pagos: $p • Asistencias: $a"
             }
         }
         onText(txt)
     }
 }
+

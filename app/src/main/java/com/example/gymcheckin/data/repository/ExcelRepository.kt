@@ -14,61 +14,82 @@ import kotlinx.coroutines.withContext
 import java.time.LocalDate
 
 class ExcelRepository(
-    val excelSync: ExcelSync
+    private val excelSync: ExcelSync
 ) : GymRepository {
 
     private fun safeUriOrNull(ctx: Context): Uri? = ExcelLinkStore.getUri(ctx)
 
-    override suspend fun getCounts(context: Context): Triple<Int, Int, Int> = withContext(Dispatchers.IO) {
-        val uri = safeUriOrNull(context) ?: return@withContext Triple(0, 0, 0)
-        val clientes = excelSync.readClientes(context, uri).size
-        val pagos = excelSync.readPagos(context, uri).size
-        val asistencias = excelSync.readAsistencias(context, uri).size
-        Triple(clientes, pagos, asistencias)
+    // ---------- HELPERS ----------
+    private suspend fun withLocalFile(
+        ctx: Context,
+        block: suspend (localFile: java.io.File, driveUri: Uri) -> Unit
+    ) {
+        val uri = safeUriOrNull(ctx) ?: return
+        val localFile = excelSync.copyExcelToLocal(ctx, uri)
+        block(localFile, uri)
+        excelSync.exportToDrive(ctx, localFile, uri) // siempre sincroniza cambios
     }
 
-    // ---------------- CLIENTES ----------------
-    override suspend fun getClientePorDni(context: Context, dni: String): ClienteEntity? =
+    private suspend fun <T> withLocalFileResult(
+        ctx: Context,
+        block: suspend (localFile: java.io.File, driveUri: Uri) -> T
+    ): T? {
+        val uri = safeUriOrNull(ctx) ?: return null
+        val localFile = excelSync.copyExcelToLocal(ctx, uri)
+        val result = block(localFile, uri)
+        excelSync.exportToDrive(ctx, localFile, uri)
+        return result
+    }
+
+    // ---------- COUNTS ----------
+    override suspend fun getCounts(context: Context): Triple<Int, Int, Int> =
         withContext(Dispatchers.IO) {
-            val uri = safeUriOrNull(context) ?: return@withContext null
-            excelSync.readClientes(context, uri)
-                .firstOrNull { it.dni == dni }
-                ?.toEntity()
+            val uri = safeUriOrNull(context) ?: return@withContext Triple(0, 0, 0)
+            val localFile = excelSync.copyExcelToLocal(context, uri)
+            val clientes = excelSync.readClientes(localFile).size
+            val pagos = excelSync.readPagos(localFile).size
+            val asistencias = excelSync.readAsistencias(localFile).size
+            Triple(clientes, pagos, asistencias)
+        }
+
+    // ---------- CLIENTES ----------
+    override suspend fun getClientePorDni(context: Context, dni: String): ClienteEntity? =
+        withLocalFileResult(context) { localFile, _ ->
+            excelSync.readClientes(localFile).firstOrNull { it.dni == dni }?.toEntity()
         }
 
     override suspend fun getClientes(context: Context): List<ClienteEntity> =
         withContext(Dispatchers.IO) {
             val uri = safeUriOrNull(context) ?: return@withContext emptyList()
-            excelSync.readClientes(context, uri).map { it.toEntity() }
+            val localFile = excelSync.copyExcelToLocal(context, uri)
+            excelSync.readClientes(localFile).map { it.toEntity() }
         }
 
     override suspend fun upsertCliente(context: Context, cliente: ClienteEntity) =
-        withContext(Dispatchers.IO) {
-            val uri = safeUriOrNull(context) ?: return@withContext
-            excelSync.upsertClienteExcel(context, uri, cliente.toExcelDto())
+        withLocalFile(context) { localFile, _ ->
+            excelSync.upsertCliente(localFile, cliente.toExcelDto())
         }
 
-    // ---------------- PAGOS ----------------
-// ---------------- PAGOS ----------------
+    // ---------- PAGOS ----------
     override suspend fun upsertPago(context: Context, pago: PagoEntity) =
-        withContext(Dispatchers.IO) {
-            val uri = safeUriOrNull(context) ?: return@withContext
+        withLocalFile(context) { localFile, _ ->
             excelSync.upsertPagoSeguro(
-                ctx = context,
-                uri = uri,
+                localFile = localFile,
                 dto = pago.toExcelDto(),
                 nombre = pago.nombre,
                 apellido = pago.apellido
             )
         }
 
-
     override suspend fun getPagos(context: Context): List<PagoEntity> =
         withContext(Dispatchers.IO) {
             val uri = safeUriOrNull(context) ?: return@withContext emptyList()
-            excelSync.resetPagosSiNuevoMes(context, uri)
-            val clientes = excelSync.readClientes(context, uri) // para nombre y apellido
-            excelSync.readPagos(context, uri).map { dto ->
+            val localFile = excelSync.copyExcelToLocal(context, uri)
+
+            excelSync.resetPagosSiNuevoMes(localFile)
+
+            val clientes = excelSync.readClientes(localFile)
+            excelSync.readPagos(localFile).map { dto ->
                 val cliente = clientes.firstOrNull { it.dni == dto.dni }
                 dto.toEntity(cliente?.nombre ?: "Desconocido", cliente?.apellido ?: "")
             }
@@ -77,36 +98,52 @@ class ExcelRepository(
     override suspend fun getUltimoPago(context: Context, dni: String): PagoEntity? =
         withContext(Dispatchers.IO) {
             val uri = safeUriOrNull(context) ?: return@withContext null
-            val clientes = excelSync.readClientes(context, uri)
-            val dto = excelSync.readPagos(context, uri)
+            val localFile = excelSync.copyExcelToLocal(context, uri)
+
+            val clientes = excelSync.readClientes(localFile)
+            val dto = excelSync.readPagos(localFile)
                 .filter { it.dni == dni }
                 .maxByOrNull { it.fechaPago } ?: return@withContext null
+
             val cliente = clientes.firstOrNull { it.dni == dni }
             dto.toEntity(cliente?.nombre ?: "Desconocido", cliente?.apellido ?: "")
         }
 
-    // ---------------- ASISTENCIAS ----------------
-    override suspend fun countAsistenciasSemana(context: Context, dni: String, start: Long, end: Long): Int =
-        withContext(Dispatchers.IO) {
-            val uri = safeUriOrNull(context) ?: return@withContext 0
-            excelSync.resetAsistenciasSiNuevoMes(context, uri)
-            excelSync.readAsistencias(context, uri)
-                .map { it.toEntity() }
-                .count { it.dniCliente == dni && !it.fecha.isBefore(java.time.Instant.ofEpochMilli(start).atZone(java.time.ZoneId.systemDefault()).toLocalDate()) && !it.fecha.isAfter(java.time.Instant.ofEpochMilli(end).atZone(java.time.ZoneId.systemDefault()).toLocalDate()) }
-        }
+    // ---------- ASISTENCIAS ----------
+    override suspend fun countAsistenciasSemana(
+        context: Context,
+        dni: String,
+        start: Long,
+        end: Long
+    ): Int = withContext(Dispatchers.IO) {
+        val uri = safeUriOrNull(context) ?: return@withContext 0
+        val localFile = excelSync.copyExcelToLocal(context, uri)
+
+        excelSync.resetAsistenciasSiNuevoMes(localFile)
+        excelSync.readAsistencias(localFile)
+            .map { it.toEntity() }
+            .count {
+                it.dniCliente == dni &&
+                        !it.fecha.isBefore(java.time.Instant.ofEpochMilli(start)
+                            .atZone(java.time.ZoneId.systemDefault()).toLocalDate()) &&
+                        !it.fecha.isAfter(java.time.Instant.ofEpochMilli(end)
+                            .atZone(java.time.ZoneId.systemDefault()).toLocalDate())
+            }
+    }
 
     override suspend fun appendAsistenciaOk(
         context: Context,
         asistencia: AsistenciaEntity,
         limiteSemanal: Int?,
         countSemanaPrevio: Int
-    ) = withContext(Dispatchers.IO) {
-        val uri = safeUriOrNull(context) ?: return@withContext
+    ) = withLocalFile(context) { localFile, _ ->
         val cliente = getClientePorDni(context, asistencia.dniCliente)
-        val estado = if (limiteSemanal == null || countSemanaPrevio + 1 <= limiteSemanal) "OK" else "EXCEDIDO"
+        val estado =
+            if (limiteSemanal == null || countSemanaPrevio + 1 <= limiteSemanal) "OK"
+            else "EXCEDIDO"
+
         excelSync.appendAsistenciaExcel(
-            ctx = context,
-            uri = uri,
+            localFile = localFile,
             dto = asistencia.toExcelDto(),
             estado = estado,
             nombre = cliente?.nombre ?: "",
@@ -118,12 +155,10 @@ class ExcelRepository(
         context: Context,
         asistencia: AsistenciaEntity,
         estado: String
-    ) = withContext(Dispatchers.IO) {
-        val uri = safeUriOrNull(context) ?: return@withContext
+    ) = withLocalFile(context) { localFile, _ ->
         val cliente = getClientePorDni(context, asistencia.dniCliente)
         excelSync.appendAsistenciaExcel(
-            ctx = context,
-            uri = uri,
+            localFile = localFile,
             dto = asistencia.toExcelDto(),
             estado = estado,
             nombre = cliente?.nombre ?: "",
@@ -133,8 +168,9 @@ class ExcelRepository(
 
     override suspend fun resetPagosSiNuevoMes(context: Context, uri: Uri) =
         withContext(Dispatchers.IO) {
-            excelSync.resetPagosSiNuevoMes(context, uri)
-        }
-
+            val localFile = excelSync.copyExcelToLocal(context, uri)
+            excelSync.resetPagosSiNuevoMes(localFile)
+            excelSync.exportToDrive(context, localFile, uri)
+        }.let { }
 
 }
