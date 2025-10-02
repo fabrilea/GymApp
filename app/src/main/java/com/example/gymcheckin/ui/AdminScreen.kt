@@ -230,6 +230,46 @@ fun ExcelScreenAdmin(vm: MainViewModel, onBack: () -> Unit = { vm.goTo(Screen.Ad
                 OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
                     Text("Volver")
                 }
+
+                Button(
+                    onClick = {
+                        val uri = excelUri
+                        if (uri == null) {
+                            status = "Vinculá un Excel primero."
+                            statusKind = MessageKind.Error
+                        } else {
+                            scope.launch {
+                                runCatching {
+                                    withContext(Dispatchers.IO) {
+                                        val localFile = sync.copyExcelToLocal(ctx, uri)
+                                        val restored = sync.restoreLastBackup(localFile)
+                                        if (restored) {
+                                            // Exportamos de vuelta a Drive para que quede restaurado en origen
+                                            sync.exportToDrive(ctx, localFile, uri)
+                                        }
+                                        restored
+                                    }
+                                }.onSuccess { restored ->
+                                    if (restored) {
+                                        status = "Se restauró el último backup ✅"
+                                        statusKind = MessageKind.Ok
+                                        refresh()
+                                    } else {
+                                        status = "No hay backups disponibles"
+                                        statusKind = MessageKind.Warning
+                                    }
+                                }.onFailure { e ->
+                                    status = "Error al restaurar: ${e.message}"
+                                    statusKind = MessageKind.Error
+                                }
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Restaurar Backup")
+                }
+
             }
         }
     }

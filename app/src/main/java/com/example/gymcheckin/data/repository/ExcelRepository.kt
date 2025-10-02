@@ -86,7 +86,6 @@ class ExcelRepository(
             val uri = safeUriOrNull(context) ?: return@withContext emptyList()
             val localFile = excelSync.copyExcelToLocal(context, uri)
 
-            excelSync.resetPagosSiNuevoMes(localFile)
 
             val clientes = excelSync.readClientes(localFile)
             excelSync.readPagos(localFile).map { dto ->
@@ -166,11 +165,5 @@ class ExcelRepository(
         )
     }
 
-    override suspend fun resetPagosSiNuevoMes(context: Context, uri: Uri) =
-        withContext(Dispatchers.IO) {
-            val localFile = excelSync.copyExcelToLocal(context, uri)
-            excelSync.resetPagosSiNuevoMes(localFile)
-            excelSync.exportToDrive(context, localFile, uri)
-        }.let { }
 
 }

@@ -13,6 +13,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.time.LocalDate
+import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
 class ExcelSync {
@@ -23,6 +24,8 @@ class ExcelSync {
         private const val HOJA_ASISTENCIAS = "asistencias"
 
         private val DATE_FMT: DateTimeFormatter = DateTimeFormatter.ISO_LOCAL_DATE
+        private val BACKUP_FMT: DateTimeFormatter =
+            DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss")
     }
 
     // ----------- Helpers de import/export con Drive -----------
@@ -36,12 +39,70 @@ class ExcelSync {
 
     // ----------- Apertura y guardado -----------
 
-    private fun openWorkbook(localFile: File): Workbook =
-        FileInputStream(localFile).use { fis -> WorkbookFactory.create(fis) }
+    private fun openWorkbook(localFile: File): Workbook {
+        return try {
+            FileInputStream(localFile).use { fis ->
+                WorkbookFactory.create(fis)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            println("⚠ Excel corrupto, se regenerará un archivo nuevo: ${localFile.name}")
+
+            // Creamos un workbook nuevo vacío
+            val nuevo = WorkbookFactory.create(true).apply {
+                ensureAllSheets(this)
+            }
+
+            // Guardamos nuevo archivo (ya genera backup)
+            saveWorkbook(localFile, nuevo)
+            nuevo
+        }
+    }
 
     private fun saveWorkbook(localFile: File, wb: Workbook) {
-        FileOutputStream(localFile).use { fos -> wb.write(fos) }
-        wb.close()
+        try {
+            // 📌 1. Generar nombre con timestamp
+            val timestamp = LocalDateTime.now().format(BACKUP_FMT)
+            val backupFile = File(localFile.parentFile, "backup_${timestamp}_${localFile.name}")
+
+            // 📌 2. Guardar backup primero
+            FileOutputStream(backupFile).use { fos -> wb.write(fos) }
+
+            // 📌 3. Reescribir archivo principal
+            FileOutputStream(localFile).use { fos -> wb.write(fos) }
+
+            // 📌 4. Mantener solo los últimos 5 backups
+            cleanupOldBackups(localFile.parentFile, localFile.name, keep = 5)
+
+            println("✅ Backup creado en: ${backupFile.absolutePath}")
+        } finally {
+            wb.close()
+        }
+    }
+
+    private fun cleanupOldBackups(dir: File, baseName: String, keep: Int = 5) {
+        val backups = dir.listFiles { f ->
+            f.name.contains("backup_") && f.name.contains(baseName)
+        }?.sortedByDescending { it.lastModified() } ?: return
+
+        if (backups.size > keep) {
+            backups.drop(keep).forEach { it.delete() }
+        }
+    }
+
+    // ----------- Restaurar último backup -----------
+
+    fun restoreLastBackup(localFile: File): Boolean {
+        val backups = localFile.parentFile?.listFiles { f ->
+            f.name.contains("backup_") && f.name.contains(localFile.name)
+        }?.sortedByDescending { it.lastModified() } ?: return false
+
+        if (backups.isNotEmpty()) {
+            backups.first().copyTo(localFile, overwrite = true)
+            println("✅ Restaurado desde backup: ${backups.first().absolutePath}")
+            return true
+        }
+        return false
     }
 
     // ----------- Asegurar hojas -----------
@@ -83,7 +144,6 @@ class ExcelSync {
             }
         }
     }
-
     // ----------- Lectores -----------
 
     suspend fun readClientes(localFile: File): List<ClienteExcelDto> =
@@ -377,60 +437,6 @@ class ExcelSync {
         saveWorkbook(localFile, wb)
     }
 
-
-    fun resetPagosSiNuevoMes(localFile: File) {
-        val wb = openWorkbook(localFile)
-
-        val sheet = wb.getSheet(HOJA_PAGOS)
-        if (sheet != null && sheet.lastRowNum > 0) {
-            val primerPago = sheet.getRow(1)
-            val fechaStr = primerPago?.getCell(3)?.toString()?.trim()
-            val fecha = if (!fechaStr.isNullOrBlank()) {
-                try {
-                    LocalDate.parse(fechaStr, DATE_FMT)
-                } catch (_: Exception) {
-                    null
-                }
-            } else null
-
-            val mesGuardado = fecha?.monthValue
-            val anioGuardado = fecha?.year
-            val hoy = LocalDate.now()
-
-            if (mesGuardado != hoy.monthValue || anioGuardado != hoy.year) {
-                val idx = wb.getSheetIndex(HOJA_PAGOS)
-                val backupName =
-                    "pagos_${anioGuardado ?: "NA"}_${
-                        mesGuardado?.toString()?.padStart(2, '0') ?: "NA"
-                    }"
-
-                val existingIdx = wb.getSheetIndex(backupName)
-                if (existingIdx != -1) {
-                    wb.removeSheetAt(existingIdx)
-                }
-
-                wb.setSheetName(idx, backupName)
-
-                // 👇 aseguramos que nunca quede vacío
-                ensureAtLeastOneSheet(wb)
-
-                wb.createSheet(HOJA_PAGOS).apply {
-                    val headerRow = createRow(getLastUsedRowIndex(this) + 1)
-                    headerRow.createCell(0).setCellValue("dni")
-                    headerRow.createCell(1).setCellValue("nombre")
-                    headerRow.createCell(2).setCellValue("apellido")
-                    headerRow.createCell(3).setCellValue("fechaPago")
-                    headerRow.createCell(4).setCellValue("monto")
-                    headerRow.createCell(5).setCellValue("diasPorSemana")
-                    headerRow.createCell(6).setCellValue("fechaInicio")
-                    headerRow.createCell(7).setCellValue("fechaFin")
-                }
-            }
-        }
-
-        saveWorkbook(localFile, wb)
-    }
-
     private fun ensureAtLeastOneSheet(wb: Workbook) {
         if (wb.numberOfSheets == 0) {
             wb.createSheet("Sheet1").apply {
@@ -447,8 +453,7 @@ class ExcelSync {
         fechaMs: Long,
         diasPorSemana: Int
     ) {
-        // Abrir workbook desde el archivo local
-        val wb = WorkbookFactory.create(FileInputStream(localFile))
+        val wb = openWorkbook(localFile)
         val sheetClientes = wb.getSheet("clientes") ?: error("No existe la hoja 'clientes'")
         val sheetPagos = wb.getSheet("pagos") ?: wb.createSheet("pagos")
 
@@ -504,22 +509,20 @@ class ExcelSync {
             rowCli.createCell(3).setCellValue(fecha.toString())
         }
 
-        // Guardar cambios en el archivo local
-        FileOutputStream(localFile).use { fos ->
-            wb.write(fos)
-        }
-        wb.close()
+        // 🔹 Guardar con backup
+        saveWorkbook(localFile, wb)
 
         // 🔹 Reiniciar asistencias desde este pago
         reconcileAsistenciasPorPago(localFile, dni, fecha, diasPorSemana)
     }
+
     fun reconcileAsistenciasPorPago(
         localFile: File,
         dni: String,
         fechaInicio: LocalDate,
         diasPorSemana: Int
     ) {
-        val wb = WorkbookFactory.create(FileInputStream(localFile))
+        val wb = openWorkbook(localFile)
         val asistenciasSheet = wb.getSheet("asistencias") ?: return
         val pagosSheet = wb.getSheet("pagos") ?: return
 
@@ -581,9 +584,9 @@ class ExcelSync {
             }
         }
 
-        // Guardar cambios
-        FileOutputStream(localFile).use { fos -> wb.write(fos) }
-        wb.close()
+        // 🔹 Guardar con backup
+        saveWorkbook(localFile, wb)
     }
+
 
 }

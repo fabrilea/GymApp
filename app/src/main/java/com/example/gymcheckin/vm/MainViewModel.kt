@@ -234,12 +234,6 @@ class MainViewModel(
                     return@launch
                 }
 
-                // reset de pagos si nuevo mes
-                val uri = com.example.gymcheckin.data.ExcelLinkStore.getUri(context)
-                if (uri != null) {
-                    repo.resetPagosSiNuevoMes(context, uri)
-                }
-
                 val cliente = repo.getClientePorDni(context, dni)
                 val nombre = cliente?.nombre ?: ""
                 val apellido = cliente?.apellido ?: ""

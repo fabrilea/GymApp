@@ -24,5 +24,4 @@ interface GymRepository {
     suspend fun countAsistenciasSemana(context: Context, dni: String, start: Long, end: Long): Int
     suspend fun appendAsistenciaOk(context: Context, asistencia: AsistenciaEntity, limiteSemanal: Int?, countSemanaPrevio: Int)
     suspend fun appendAsistenciaEstadoFijo(context: Context, asistencia: AsistenciaEntity, estado: String)
-    suspend fun resetPagosSiNuevoMes(context: Context, uri: Uri)
 }
