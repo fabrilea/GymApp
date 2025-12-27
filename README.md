@@ -10,7 +10,6 @@ y manejo de datos en una app realista.
 - Gradle (Kotlin DSL)
 - Android Studio
 
-> (Opcional) Agregar aquí si usás: Jetpack Compose / Room / Firebase / Retrofit / Coroutines, etc.
 
 ## ✨ Funcionalidades
 - (Completar según lo que tenga tu app)
